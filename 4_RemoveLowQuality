@@ -1,0 +1,5 @@
+module load samtools/0.0.19
+
+samtools view -h -o CT1_bowtieoutput_Picard2.sam CT1_bowtieoutput_Picard2.bam
+
+samtools view -Sq 10 CT1_bowtieoutput_Picard2.sam > CT1_filtered.sam
