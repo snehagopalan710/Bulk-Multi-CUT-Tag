@@ -1,0 +1,14 @@
+module load samtools/0.0.19
+Module load homer/
+
+makeTagDirectory CT1/ CT1_filtered.sam
+
+makeUCSCfile CT1 -o auto
+
+annotatePeaks.pl /path_to/peak_file.txt mm10 -size 4000 -hist 20 -d /path_to/CT1/ > CT1_graph.txt
+
+annotatePeaks.pl /path_to/peak_file.txt mm10 -size 4000 -hist 20 -ghist -d /path_to/CT1T/ > CT1_heatmap.txt
+
+findPeaks CT1/ -style factor -o auto 
+
+annotatePeaks.pl CT1/peaks.txt mm10 > CT1/annotatedpeaks.txt
