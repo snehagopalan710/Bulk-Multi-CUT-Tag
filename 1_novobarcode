@@ -1,0 +1,3 @@
+module load novocraft/V3.02.08
+
+novobarcode -b mybarcode.txt -f CT1_R1.fastq CT1_R2.fastq -l 42
