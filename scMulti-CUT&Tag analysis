@@ -1,0 +1,162 @@
+
+###### bcl2fastq
+Generate the sample index file: sample_sheet.csv
+Lane,Sample,Index
+*,cuttag,SI-NA-A1
+
+module load bcl2fastq/2.17.1.14
+module load cellranger-atac/1.1.0
+
+cellranger-atac mkfastq --id=cuttag \
+--run=path_to/bcl_folder \
+--csv=path_to/sample_sheet.csv \
+--qc
+
+
+###### (optional) split fastq to parallel the next few steps.
+zless cuttag_{R1,R2,R3}.fastq.gz | split -l 4000000 - path_to/cuttag_{R1,R2,R3}-
+
+# rename to .fastq.gz
+for f in $(ls cuttag_{R1,R2,R3}-*); do mv $f $f.fastq; done
+for f in $(ls cuttag_{R1,R2,R3}-*.fastq); do bsub -n 1 -q short -W 0:15 -R rusage[mem=20] "gzip $f"; done
+
+
+###### Extract valid reads
+module load python/2.7.5
+module load python/2.7.5_packages/biopython/1.68 # Only for Umass clusters.
+
+python path_to/extractValidReads_multiCUTTag_nobccorrect.py -i path_to/cuttag_R1.fastq -odir output_directory -b1 antibody_barcodes_in_R1 -b2 antibody_barcodes_in_R2
+
+
+###### Trim potential read through adaptor
+module load python/2.7.9
+module load cutadapt/1.9
+
+cutadapt -a CTGTCTCTTATACACATCTG -A CTGTCTCTTATACACATCTG --minimum-length=20 -o path_to/cuttag_R1_cut.fastq.gz -p path_to/cuttag_R2_cut.fastq.gz path_to/cuttag_R1_valid.fastq.gz path_to/cuttag_R2_valid.fastq.gz
+
+
+###### Alignment
+module load bowtie2/2.4.1
+module load samtools/1.9
+stat=path_to/cuttag_alignmant.bow; \
+
+bowtie2 -x path_to/mouse/mm10/Bowtie2Index/genome -p 1 --no-unal -1 path_to/cuttag_R1_cut.fastq.gz -2 path_to/cuttag_R2_cut.fastq.gz -S path_to/cuttag_alignmant.sam > $stat 2>&1
+grep -v Warning $stat > $stat.tmp
+mv $stat.tmp $stat
+samtools view -bS path_to/cuttag_alignmant.sam > path_to/cuttag_alignmant.bam
+rm -f path_to/cuttag_alignmant.sam
+
+
+###### (optional) mergeBAM if have more than one lane or did the split fastq step
+module load samtools/1.9
+
+samtools merge path_to/cuttag_alignment.bam cuttag-??_alignment.bam
+# ?? is the serial number for files split from the same fastq file.
+
+
+###### dedup
+module load samtools/1.9
+
+samtools view -f 67 -q 30 cuttag_alignment.bam | awk -v OFS=":" '{print $1,$3,$4,$8}' | awk -F':' -v OFS="\t" '{print $8,$9,$10,$11,$12,$13}' | awk -v OFS="\t" '{print $4":"$5":"$6":"$1":"$2":"$3}' | sort | uniq -c > path_to/cuttag_fragments.txt
+
+python path_to/cuttag_dedup.py -odir output_directory -f cuttag_fragments.txt -endbp 3 -perc_cutoff 0.7 -aba antibody1_name antibody1_barcodes -abb antibody2_name antibody2_barcodes
+
+Outputs:
+1. cuttag_fragments_dedup.txt: Fragments after deduplication
+Duplicates are defined as all fragments with the same cell barcodes, start location and end location.
+File format:
+chromosome start_location end_location cell_barcode start_antibody_barcode end_antibody_barcode
+
+2. cuttag_fragments_antibody1.txt cuttag_fragments_antibody2.txt: All cut sites with barcodes for the corresponding antibody.
+chromosome cut_site_location cell_barcode
+
+3. cuttag_fragments_freq.txt: frequency of antibody barcodes at each unique cut sites.
+More than one antibody barcodes can show up at the same cut site location due to the left over primers. However, the rate should be at a very low level for a good quality library. In this document, the antibody barcode information of each unique cut site was recorded as a row. Each number represents the number of reads with a specific antibody barcode at that cut site. Therefore, the rows with more than one number have more than one antibody barcodes detected at that cut site. The -perc_cutoff 0.7 means the cut site will only be kept in the deduplicated file if the most represented antibody barcode accounts for more than 70% of the total reads of that cut site, thus removing the ambiguous antibody assignment.
+
+
+###### Call peaks
+module load samtools/1.9
+module load bedtools/2.28.0
+module load macs/1.4.2
+
+ab="antibody_name"
+cat path_to/cuttag_fragments_${ab}.txt | awk -v OFS="\t" '{print $1,$2,$2,$3}' | bedtools sort -i - > ${ab}_cutsites.bed;
+bedtools slop -b 100 -i ${ab}_cutsites.bed -g path_to/mouse/mm10/mm10.chrom.sizes | awk -v OFS="\t" '{print $1,$2,$3,$4}' > ${ab}_windows.bed;
+macs2 callpeak -t ${ab}_windows.bed -c path_to/control.bam -n ${ab} -g mm -q 0.0001 --nomodel --broad -s 200;
+
+
+###### filter & merge
+# Get the coverage track for each antibody and find the loose cutoff to remove obvious noise.
+module load bedtools/2.28.0
+
+cat path_to/${ab}_cutsites.bed | awk -v OFS="\t" '{print $1,$2,$3}' | bedtools sort -i - | bedtools coverage -a path_to/${ab}_peaks.broadPeak -b stdin | awk -v OFS="\t" '{print $1,$2,$3,$4,$6}' > ${ab}_coverage_tmp.bed;
+
+# filter
+cpbpmc=2; # cutoff for cut sites per basepairs per million cut sites
+cutnum=2; # cutoff for cut sites number in the peak
+
+totalcut=$(cat path_to/${ab}_cutsites.bed | wc -l);
+cat ${ab}_coverage_tmp.bed | awk -v cs=$totalcut -v OFS="\t" -v cp=$cpbpmc -v v4=$cutnum '{if($4/$5*1000000000/cs>cp && $4>v4) print $1,$2,$3}' > ${ab}_coverage_tmp_filtered.bed;
+
+# merge peaks within 3000bp
+bedtools sort -i path_to/${ab}_coverage_tmp_filtered.bed | bedtools merge -d 3000 -i - > ${ab}_m3000.bed;
+rm *_tmp*
+
+
+###### filter blacklist
+# mm10_blacklisted_encode.bed is the blacklist regions provided by ENCODE
+module load bedtools/2.28.0
+
+bedtools intersect -v -a path_to/${ab}_m3000.bed -b path_to/mm10_blacklisted_encode.bed | bedtools sort -i - > ${ab}_m3000_bl.bed;
+
+
+###### single-cell coverage
+# generate the matrix for each antibody separately
+module load bedtools/2.28.0
+
+# only use barcodes with more than 9 cut sites
+cat path_to/cuttag_fragments_dedup.txt | awk '{print $4}' | sort | uniq -c > barcode_freq.txt
+cat path_to/barcode_freq.txt | awk '{if($1>9)print $2}' > cuttag_selectedCB_greater9.txt
+
+ab="antibody_name";
+cat path_to/cuttag_fragments_${ab}_bl.txt | awk -v OFS="\t" '{print $1,$2,$2,$3}' | bedtools sort -i - > ${ab}_cutsites.bed;
+mkdir tmp;
+n=1;
+cat cuttag_selectedCB_greater9.txt | wc -l;
+for b in $(cat cuttag_selectedCB_greater9.txt);
+do grep -w $b ${ab}_cutsites.bed | awk -v OFS="\t" '{print $1,$2,$3}' | bedtools sort -i - | bedtools coverage -a path_to/${ab}_m3000_bl.bed -b stdin | awk '{print $4}' > tmp/${b}_coverage.txt;
+echo $n;
+n=$(($n+1));
+done;
+cp cuttag_selectedCB_greater9.txt tmp/peak_bc_matrix_${ab}_colnames.txt;
+cd tmp;
+cat peak_bc_matrix_${ab}_colnames.txt | awk '{print $1"_coverage.txt"}' | split -l 1000 -d - lists;
+for list in lists*; do paste $(cat ${list}) > merge${list##lists}; done
+paste merge* > peak_bc_matrix_${ab}.txt;
+cat path_to/${ab}_m3000_bl.bed | awk -v ab="$ab" '{print $1":"$2"-"$3}' > peak_bc_matrix_${ab}_rownames.txt;
+mv peak_bc_matrix* ../;
+rm tmp -r;
+
+
+###### cell type tracks
+Clustering on Rstudio. Then upload the cell type annotation '${s}_barcodes'.
+module load bedtools/2.28.0
+module load ucsc_cmdline_util/12_16_2013
+
+s="cell_type_name"
+ab="antibody_name"
+
+cat path_to/cuttag_fragments_${ab}_bl.txt | fgrep -w -f ${s}_barcodes - | awk -v OFS="\t" '{print $1,$2,$2,$3}' | bedtools sort -i - > ${s}_${ab}_cutsites.bed;
+bedtools slop -b 100 -i ${s}_${ab}_cutsites.bed -g path_to/mouse/mm10/mm10.chrom.sizes | awk -v OFS="\t" '{print $1,$2,$3}' > ${s}_${ab}_windows.bed; 
+bedtools coverage -a ${s}_${ab}_windows.bed -b ${s}_${ab}_cutsites.bed -counts | bedtools sort -i - > ${s}_${ab}.bedGraph;
+rm ${s}_${ab}_cutsites.bed;
+rm ${s}_${ab}_windows.bed;
+
+sf=$(cat ${s}_${ab}.bedGraph | awk '{sum+=$4}END{print 1000000/sum}');
+bedtools genomecov -i ${s}_${ab}.bedGraph -g path_to/mouse/mm10/mm10.chrom.sizes -bga -scale $sf > tmp.bedGraph;
+bedGraphToBigWig tmp.bedGraph path_to/mouse/mm10/mm10.chrom.sizes ${s}_${ab}_scaled.bw;
+rm tmp.bedGraph;
+
+
+
+
