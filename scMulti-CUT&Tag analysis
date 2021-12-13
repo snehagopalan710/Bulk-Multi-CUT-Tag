@@ -114,7 +114,7 @@ bedtools intersect -v -a path_to/${ab}_m3000.bed -b path_to/mm10_blacklisted_enc
 # generate the matrix for each antibody separately
 module load bedtools/2.28.0
 
-# only use barcodes with more than 9 cut sites
+# Set minimum of Ab cut sites per droplet barcode; we set to 9 for these studies
 cat path_to/cuttag_fragments_dedup.txt | awk '{print $4}' | sort | uniq -c > barcode_freq.txt
 cat path_to/barcode_freq.txt | awk '{if($1>9)print $2}' > cuttag_selectedCB_greater9.txt
 
