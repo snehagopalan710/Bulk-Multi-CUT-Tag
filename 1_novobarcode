@@ -1,3 +1,15 @@
 module load novocraft/V3.02.08
 
 novobarcode -b mybarcode.txt -f CT1_R1.fastq CT1_R2.fastq -l 42
+
+
+
+#barcode.txt fie example (for splitting based on R1):
+
+Distance 8
+Format 5 N
+
+1 GGCTCTGA 
+2 TATAGCCT
+
+#Repeat novobarcode to split each output from above to split reads further based on R2 barcodes. 
